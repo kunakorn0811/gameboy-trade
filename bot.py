@@ -11,7 +11,7 @@ FIREBASE_URL = "https://iqoo-signal-bot-default-rtdb.firebaseio.com/current_trad
 
 # ตั้งค่าโทเคนสำหรับการแจ้งเตือน
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_TOKEN", "ใส่_LINE_TOKEN_ตรงนี้")
-LINE_USER_ID = os.environ.get("LINE_USER_ID", "kunakorn.pdg")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "ใส่_LINE_USER_ID_ตรงนี้")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -37,7 +37,7 @@ def send_notifications(msg_text):
         except Exception as e:
             print("LINE Send Error:", e)
 
-    # Telegram Notification (ตัวสำรองฟรี)
+    # Telegram Notification (ตัวสำรอง)
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         try:
             requests.post(
@@ -48,11 +48,11 @@ def send_notifications(msg_text):
         except Exception as e:
             print("Telegram Send Error:", e)
 
-def check_engulfing(df):
-    prev_open = df['Open'].iloc[-2]
-    prev_close = df['Close'].iloc[-2]
-    curr_open = df['Open'].iloc[-1]
-    curr_close = df['Close'].iloc[-1]
+def check_engulfing(open_s, close_s):
+    prev_open = float(open_s.iloc[-2])
+    prev_close = float(close_s.iloc[-2])
+    curr_open = float(open_s.iloc[-1])
+    curr_close = float(close_s.iloc[-1])
     
     bullish = (prev_close < prev_open) and (curr_close > curr_open) and (curr_close >= prev_open) and (curr_open <= prev_close)
     bearish = (prev_close > prev_open) and (curr_close < curr_open) and (curr_close <= prev_open) and (curr_open >= prev_close)
@@ -67,23 +67,33 @@ def run_bot():
         df = yf.download(tickers=ticker, period='5d', interval='15m', progress=False)
         if df.empty or len(df) < 200:
             continue
+        
+        # --- จัดการแปลงมิติข้อมูลของ yfinance ให้เป็น 1D Series ป้องกัน ValueError ---
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
             
-        df['ema50'] = ta.trend.ema_indicator(df['Close'], window=50)
-        df['ema200'] = ta.trend.ema_indicator(df['Close'], window=200)
-        df['atr'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=14)
+        close_s = df['Close'].squeeze()
+        high_s = df['High'].squeeze()
+        low_s = df['Low'].squeeze()
+        open_s = df['Open'].squeeze()
         
-        last_close = float(df['Close'].iloc[-1])
-        last_ema50 = float(df['ema50'].iloc[-1])
-        last_ema200 = float(df['ema200'].iloc[-1])
-        last_atr = float(df['atr'].iloc[-1])
+        # คำนวณ Indicators
+        ema50_s = ta.trend.ema_indicator(close_s, window=50)
+        ema200_s = ta.trend.ema_indicator(close_s, window=200)
+        atr_s = ta.volatility.average_true_range(high_s, low_s, close_s, window=14)
         
-        is_bull_engulf, is_bear_engulf = check_engulfing(df)
+        last_close = float(close_s.iloc[-1])
+        last_ema50 = float(ema50_s.iloc[-1])
+        last_ema200 = float(ema200_s.iloc[-1])
+        last_atr = float(atr_s.iloc[-1])
+        
+        is_bull_engulf, is_bear_engulf = check_engulfing(open_s, close_s)
         signal_type = None
 
-        # BUY: Trend ขาขึ้น (EMA50 > EMA200) + ราคาเหนือ EMA50 + แท่งกลืนกิน Bullish
+        # BUY Signal: EMA50 > EMA200 + Close > EMA50 + Bullish Engulfing
         if (last_ema50 > last_ema200) and (last_close > last_ema50) and is_bull_engulf:
             signal_type = "BUY"
-        # SELL: Trend ขาลง (EMA50 < EMA200) + ราคาใต้ EMA50 + แท่งกลืนกิน Bearish
+        # SELL Signal: EMA50 < EMA200 + Close < EMA50 + Bearish Engulfing
         elif (last_ema50 < last_ema200) and (last_close < last_ema50) and is_bear_engulf:
             signal_type = "SELL"
             
@@ -110,10 +120,10 @@ def run_bot():
                 "opened_at": int(time.time() * 1000)
             }
             
-            # 1. ยิงสัญญาณเข้า Firebase (แสดงผลบนแอป Game Boy)
+            # 1. อัปเดตข้อมูลเข้า Firebase
             requests.put(FIREBASE_URL, json=payload, timeout=10)
             
-            # 2. ยิงแจ้งเตือนเข้า มือถือ
+            # 2. ส่งแจ้งเตือน
             line_msg = (
                 f"🎮 GAMEBOY TRADING SIGNAL!\n"
                 f"-------------------------\n"
