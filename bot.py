@@ -1,3 +1,4 @@
+import os
 import time
 import requests
 import pandas as pd
@@ -6,51 +7,127 @@ import yfinance as yf
 from datetime import datetime
 import pytz
 
-# ใส่ URL Firebase ของคุณ (อย่าลืมเติม /current_trade.json ต่อท้าย)
 FIREBASE_URL = "https://iqoo-signal-bot-default-rtdb.firebaseio.com/current_trade.json"
 
-def analyze_and_send():
+# ตั้งค่าโทเคนสำหรับการแจ้งเตือน
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_TOKEN", "ใส่_LINE_TOKEN_ตรงนี้")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "kunakorn.pdg")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+SYMBOLS = {
+    'XAUUSD / GOLD': 'GC=F',
+    'EURUSD': 'EURUSD=X'
+}
+
+def send_notifications(msg_text):
+    """ ส่งแจ้งเตือนทั้ง LINE และ Telegram """
+    # LINE Notification
+    if "ใส่_" not in LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_ACCESS_TOKEN:
+        try:
+            requests.post(
+                "https://api.line.me/v2/bot/message/push",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+                },
+                json={"to": LINE_USER_ID, "messages": [{"type": "text", "text": msg_text}]},
+                timeout=8
+            )
+        except Exception as e:
+            print("LINE Send Error:", e)
+
+    # Telegram Notification (ตัวสำรองฟรี)
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data={"chat_id": TELEGRAM_CHAT_ID, "text": msg_text},
+                timeout=8
+            )
+        except Exception as e:
+            print("Telegram Send Error:", e)
+
+def check_engulfing(df):
+    prev_open = df['Open'].iloc[-2]
+    prev_close = df['Close'].iloc[-2]
+    curr_open = df['Open'].iloc[-1]
+    curr_close = df['Close'].iloc[-1]
+    
+    bullish = (prev_close < prev_open) and (curr_close > curr_open) and (curr_close >= prev_open) and (curr_open <= prev_close)
+    bearish = (prev_close > prev_open) and (curr_close < curr_open) and (curr_close <= prev_open) and (curr_open >= prev_close)
+    return bullish, bearish
+
+def run_bot():
     tz = pytz.timezone('Asia/Bangkok')
     now = datetime.now(tz)
-    
-    # ทำงานเฉพาะเวลา 09:00 - 20:00 น. (เวลาไทย)
-    if 9 <= now.hour < 20:
-        # ดึงข้อมูลราคาทองคำ (GC=F) ไทม์เฟรม 15 นาที
-        df = yf.download(tickers='GC=F', period='5d', interval='15m', progress=False)
-        
-        if not df.empty:
-            # คำนวณ EMA 50 และ EMA 200
-            df['ema50'] = ta.trend.ema_indicator(df['Close'], window=50)
-            df['ema200'] = ta.trend.ema_indicator(df['Close'], window=200)
-            
-            last_close = float(df['Close'].iloc[-1])
-            last_ema50 = float(df['ema50'].iloc[-1])
-            last_ema200 = float(df['ema200'].iloc[-1])
-            
-            signal_type = None
-            if last_ema50 > last_ema200 and last_close > last_ema50:
-                signal_type = "BUY"
-            elif last_ema50 < last_ema200 and last_close < last_ema50:
-                signal_type = "SELL"
-                
-            if signal_type:
-                payload = {
-                    "symbol": "XAUUSD / GOLD",
-                    "type": signal_type,
-                    "entry": round(last_close, 2),
-                    "tp": round(last_close + 10.0 if signal_type == "BUY" else last_close - 10.0, 2),
-                    "sl": round(last_close - 3.3 if signal_type == "BUY" else last_close + 3.3, 2),
-                    "trend": "* HIGH CONFIRM *",
-                    "status": "RUNNING",
-                    "opened_at": int(time.time() * 1000)
-                }
-                requests.put(FIREBASE_URL, json=payload)
-                print(f"[{now.strftime('%H:%M:%S')}] ส่งสัญญาณ {signal_type} เข้า Firebase เรียบร้อย!")
+    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] เริ่มการวิเคราะห์กราฟ...")
 
-print("เริ่มทำงานบอทวิเคราะห์กราฟ...")
-while True:
-    try:
-        analyze_and_send()
-    except Exception as e:
-        print("Error:", e)
-    time.sleep(60)  # เช็คราคาทุกๆ 1 นาที
+    for name, ticker in SYMBOLS.items():
+        df = yf.download(tickers=ticker, period='5d', interval='15m', progress=False)
+        if df.empty or len(df) < 200:
+            continue
+            
+        df['ema50'] = ta.trend.ema_indicator(df['Close'], window=50)
+        df['ema200'] = ta.trend.ema_indicator(df['Close'], window=200)
+        df['atr'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=14)
+        
+        last_close = float(df['Close'].iloc[-1])
+        last_ema50 = float(df['ema50'].iloc[-1])
+        last_ema200 = float(df['ema200'].iloc[-1])
+        last_atr = float(df['atr'].iloc[-1])
+        
+        is_bull_engulf, is_bear_engulf = check_engulfing(df)
+        signal_type = None
+
+        # BUY: Trend ขาขึ้น (EMA50 > EMA200) + ราคาเหนือ EMA50 + แท่งกลืนกิน Bullish
+        if (last_ema50 > last_ema200) and (last_close > last_ema50) and is_bull_engulf:
+            signal_type = "BUY"
+        # SELL: Trend ขาลง (EMA50 < EMA200) + ราคาใต้ EMA50 + แท่งกลืนกิน Bearish
+        elif (last_ema50 < last_ema200) and (last_close < last_ema50) and is_bear_engulf:
+            signal_type = "SELL"
+            
+        if signal_type:
+            sl_distance = last_atr * 1.5
+            tp_distance = sl_distance * 3.0
+            
+            sl_price = last_close - sl_distance if signal_type == "BUY" else last_close + sl_distance
+            tp_price = last_close + tp_distance if signal_type == "BUY" else last_close - tp_distance
+            
+            decimals = 4 if "EUR" in name else 2
+            entry_p = round(last_close, decimals)
+            tp_p = round(tp_price, decimals)
+            sl_p = round(sl_price, decimals)
+
+            payload = {
+                "symbol": name,
+                "type": signal_type,
+                "entry": entry_p,
+                "tp": tp_p,
+                "sl": sl_p,
+                "trend": "* HIGH CONFIRM *",
+                "status": "RUNNING",
+                "opened_at": int(time.time() * 1000)
+            }
+            
+            # 1. ยิงสัญญาณเข้า Firebase (แสดงผลบนแอป Game Boy)
+            requests.put(FIREBASE_URL, json=payload, timeout=10)
+            
+            # 2. ยิงแจ้งเตือนเข้า มือถือ
+            line_msg = (
+                f"🎮 GAMEBOY TRADING SIGNAL!\n"
+                f"-------------------------\n"
+                f"คู่เงิน: {name}\n"
+                f"คำสั่ง: {signal_type} {'🟢' if signal_type == 'BUY' else '🔴'}\n"
+                f"ราคาเข้า (Entry): {entry_p}\n"
+                f"เป้าหมาย (TP): {tp_p}\n"
+                f"จุดตัดขาดทุน (SL): {sl_p}\n"
+                f"-------------------------\n"
+                f"เปิดแอป Game Boy บนมือถือเพื่อดูสถานะ!"
+            )
+            send_notifications(line_msg)
+            print(f"ยิงสัญญาณสำเร็จ: {name} [{signal_type}]")
+            break
+
+if __name__ == "__main__":
+    run_bot()
