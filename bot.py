@@ -10,8 +10,8 @@ import pytz
 FIREBASE_URL = "https://iqoo-signal-bot-default-rtdb.firebaseio.com/current_trade.json"
 
 # ตั้งค่าโทเคนสำหรับการแจ้งเตือน
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_TOKEN", "ใส่_LINE_TOKEN_ตรงนี้")
-LINE_USER_ID = os.environ.get("LINE_USER_ID", "ใส่_LINE_USER_ID_ตรงนี้")
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_TOKEN", "kunakorn.pdg")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "kunakorn.pdg")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
